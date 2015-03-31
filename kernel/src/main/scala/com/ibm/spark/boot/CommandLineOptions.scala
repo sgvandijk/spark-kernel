@@ -19,7 +19,7 @@ package com.ibm.spark.boot
 import java.io.{File, OutputStream}
 
 import com.ibm.spark.utils.KeyValuePairUtils
-import com.typesafe.config.{Config, ConfigFactory}
+import com.typesafe.config.{ConfigSyntax, ConfigParseOptions, Config, ConfigFactory}
 import joptsimple.util.KeyValuePair
 import joptsimple.{OptionParser, OptionSpec}
 
@@ -70,6 +70,9 @@ class CommandLineOptions(args: Seq[String]) {
     "heartbeat-port", "port of the heartbeat socket"
   ).withRequiredArg().ofType(classOf[Int])
 
+  private val _spark_defaults =
+    parser.accepts("spark-defaults", "attempt to load Apache Spark default configuration (SPARK_HOME must be set")
+
   private val _spark_configuration = parser.acceptsAll(
     Seq("spark-configuration", "S").asJava,
     "configuration setting for Apache Spark"
@@ -106,8 +109,9 @@ class CommandLineOptions(args: Seq[String]) {
   /*
    * Config object has 3 levels and fallback in this order
    * 1. Comandline Args
-   * 2. --profile file
-   * 3. Defaults
+   * 2. Apache Spark defaults (if requested)
+   * 3. --profile file
+   * 4. Defaults
    */
   def toConfig: Config = {
     val profileConfig: Config = get(_profile) match {
@@ -116,6 +120,21 @@ class CommandLineOptions(args: Seq[String]) {
       case None =>
         ConfigFactory.empty()
     }
+
+    val sparkDefaultsConfig = if (has(_spark_defaults)) {
+      val sparkDefaultsFile = for (sparkHome <- sys.env.get("SPARK_HOME"))
+        yield new File(sparkHome + "/conf/spark-defaults.conf")
+
+      val config = for (file <- sparkDefaultsFile if file.exists())
+        yield ConfigFactory.parseFile(file, ConfigParseOptions.defaults().setSyntax(ConfigSyntax.PROPERTIES))
+
+      (for (_c <- config)
+        yield ConfigFactory.parseMap(Map(
+          "spark_configuration" -> _c.entrySet.asScala.map(entry => entry.getKey + "=" + entry.getValue.unwrapped()).toList.mkString(",")
+        ).asInstanceOf[Map[String, AnyRef]].asJava))
+      .getOrElse(ConfigFactory.empty())
+    } else
+      ConfigFactory.empty()
 
     val commandLineConfig: Config = ConfigFactory.parseMap(Map(
         "spark.master" -> get(_master),
@@ -133,7 +152,7 @@ class CommandLineOptions(args: Seq[String]) {
           .flatMap(str => if (str.nonEmpty) Some(str) else None)
     ).flatMap(removeEmptyOptions).asInstanceOf[Map[String, AnyRef]].asJava)
 
-    commandLineConfig.withFallback(profileConfig).withFallback(ConfigFactory.load)
+    commandLineConfig.withFallback(sparkDefaultsConfig).withFallback(profileConfig).withFallback(ConfigFactory.load)
   }
 
   private val removeEmptyOptions: ((String, Option[Any])) => Iterable[(String, Any)] = {
